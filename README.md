@@ -57,27 +57,6 @@ kubectl apply -f deploy/service.yaml
 ```
 1. Makes sure that the webhook pod is up and running - `kubectl get pods -n webhook`. Once the webhook is up, create the webhook object - `kubectl apply -f deploy/webhook-admission-configuration.yaml`.
 
-
-## Developers Guide
-
-### What does this sample MutatingAdmissionWebhook do ?
-A MutatingAdmissionWebhook that injects an init container to pod if `inject-init-container` annotation is present in `pod`/`deployment`.
-
-### Building and Run locally
-```
-git clone git@github.com:dinumathai/admission-webhook-sample.git
-cd admission-webhook-sample
-go build github.com/dinumathai/admission-webhook-sample
-
-# TO RUN IN HTTPS mode. set the below variables
-# export SSL_CRT_FILE_NAME=deploy/ca/server.crt
-# export SSL_KEY_FILE_NAME=deploy/ca/server.key
-./admission-webhook-sample -stderrthreshold=INFO -v=3
-```
-OR
-```
-go run main.go -stderrthreshold=INFO -v=3
-```
 ## Reference
 1. https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/
 1. https://github.com/kubernetes/kubernetes/tree/release-1.9/test/images/webhook
