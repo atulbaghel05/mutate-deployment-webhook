@@ -4,28 +4,25 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/golang/glog"
 	admissionv1 "k8s.io/api/admission/v1"
-	corev1 "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
-
-var addInitContainerPatch string
 
 type admitFunc func(admissionv1.AdmissionReview) *admissionv1.AdmissionResponse
 
 // StartServer - Starts Server
-func StartServer(patch, port, urlPath string) {
-	addInitContainerPatch = patch
+func StartServer(port, urlPath string) {
 	flag.Parse()
 
-	http.HandleFunc(urlPath, serveMutatePods)
+	http.HandleFunc(urlPath, handleMutation)
 	server := &http.Server{
 		Addr: port,
 		// Validating cert from client
@@ -45,89 +42,92 @@ func StartServer(patch, port, urlPath string) {
 	}
 }
 
-func serve(w http.ResponseWriter, r *http.Request, admit admitFunc) {
-	w.Header().Set("Content-Type", "application/json")
-	var body []byte
-	if r.Body != nil {
-		if data, err := ioutil.ReadAll(r.Body); err == nil {
-			body = data
-		}
-	}
-
-	// verify the content type is accurate
-	contentType := r.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		glog.Errorf("contentType=%s, expect application/json", contentType)
+func handleMutation(w http.ResponseWriter, r *http.Request) {
+	var admissionReview admissionv1.AdmissionReview
+	if err := json.NewDecoder(r.Body).Decode(&admissionReview); err != nil {
+		http.Error(w, fmt.Sprintf("failed to decode request body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	glog.V(2).Info(fmt.Sprintf("handling request: %s", string(body)))
-	var reviewResponse *admissionv1.AdmissionResponse
-	ar := admissionv1.AdmissionReview{}
-	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(body, nil, &ar); err != nil {
-		glog.Error(err)
-		reviewResponse = toAdmissionResponse(err)
-	} else {
-		reviewResponse = admit(ar)
-	}
-	response := admissionv1.AdmissionReview{}
-	response.APIVersion = "admission.k8s.io/v1"
-	response.Kind = "AdmissionReview"
-	if reviewResponse != nil {
-		response.Response = reviewResponse
-		response.Response.UID = ar.Request.UID
-	}
-	// reset the Object and OldObject, they are not needed in a response.
-	ar.Request.Object = runtime.RawExtension{}
-	ar.Request.OldObject = runtime.RawExtension{}
+	response := mutateDeployment(&admissionReview, r)
+	admissionReview.Response = response
 
-	resp, err := json.Marshal(response)
+	respBytes, err := json.Marshal(admissionReview)
 	if err != nil {
-		glog.Error(err)
+		http.Error(w, fmt.Sprintf("failed to marshal response: %v", err), http.StatusInternalServerError)
+		return
 	}
-	glog.V(2).Info(fmt.Sprintf("sending response: %s", string(resp)))
-	if _, err := w.Write(resp); err != nil {
-		glog.Error(err)
+
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(respBytes); err != nil {
+		http.Error(w, fmt.Sprintf("failed to write response: %v", err), http.StatusInternalServerError)
 	}
 }
 
-func serveMutatePods(w http.ResponseWriter, r *http.Request) {
-	serve(w, r, mutatePods)
-}
+func mutateDeployment(review *admissionv1.AdmissionReview, r *http.Request) *admissionv1.AdmissionResponse {
 
-func mutatePods(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-	glog.V(2).Info("mutating pods")
-	podResource := metav1.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	if ar.Request.Resource != podResource {
-		glog.Errorf("expect resource to be %s", podResource)
+	glog.V(2).Info("mutating deployment")
+
+	deploymentResource := metav1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	if review.Request.Resource != deploymentResource {
+		glog.Errorf("expect resource to be %s", &deploymentResource)
 		return nil
 	}
 
-	raw := ar.Request.Object.Raw
-	pod := corev1.Pod{}
+	rawObject := review.Request.Object.Raw
+	deployment := appsv1.Deployment{}
+
 	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(raw, nil, &pod); err != nil {
+	if _, _, err := deserializer.Decode(rawObject, nil, &deployment); err != nil {
 		glog.Error(err)
 		return toAdmissionResponse(err)
 	}
-	reviewResponse := admissionv1.AdmissionResponse{}
-	reviewResponse.Allowed = true
-	for k, v := range pod.Annotations {
-		if k == "inject-init-container" && strings.ToLower(v) == "true" {
-			reviewResponse.Patch = []byte(addInitContainerPatch)
-			pt := admissionv1.PatchTypeJSONPatch
-			reviewResponse.PatchType = &pt
-			return &reviewResponse
-		}
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		glog.Error(err)
+		return toAdmissionResponse(err)
 	}
-	return &reviewResponse
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		glog.Error(err)
+		return toAdmissionResponse(err)
+	}
+
+	hpa, err := clientset.AutoscalingV1().HorizontalPodAutoscalers(deployment.Namespace).Get(r.Context(), deployment.Name, metav1.GetOptions{})
+	if err != nil {
+		glog.Error("Error fetching hpa object ", err)
+		return toAdmissionResponse(err)
+	}
+
+	if hpa != nil {
+		statusReplicas := deployment.Status.Replicas
+		patch := []byte(fmt.Sprintf("[{\"op\": \"replace\", \"path\": \"/spec/replicas\", \"value\": %d}]", statusReplicas))
+
+		glog.V(2).Info("Generated patch: %s\n", string(patch))
+
+		reviewResponse := admissionv1.AdmissionResponse{}
+		reviewResponse.Patch = patch
+		reviewResponse.Allowed = true
+		patchType := admissionv1.PatchTypeJSONPatch
+		reviewResponse.PatchType = &patchType
+		reviewResponse.UID = review.Request.UID
+		return &reviewResponse
+	}
+
+	// If no HPA is found, allow the deployment to set its own replica count
+	return &admissionv1.AdmissionResponse{
+		UID:     review.Request.UID,
+		Allowed: true,
+	}
 }
 
 func toAdmissionResponse(err error) *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{
-		Result: &metav1.Status{
+		Result: &v1.Status{
 			Message: err.Error(),
 		},
+		Allowed: false,
 	}
 }

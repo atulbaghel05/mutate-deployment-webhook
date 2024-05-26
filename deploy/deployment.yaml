@@ -20,7 +20,8 @@ spec:
     spec:
       containers:
       - name: admission-webhook
-        image: dmathai/admission-webhook-sample:latest
+        image: webhook:tag-10
+        imagePullPolicy: Never
         ports:
         - containerPort: 8080
         volumeMounts:
@@ -31,6 +32,8 @@ spec:
           value: "/cert/server.crt"
         - name: SSL_KEY_FILE_NAME
           value: "/cert/server.key"
+        - name: GODEBUG
+          value: x509sha1=1
       volumes:
       - name: admission-webhook-cert
         configMap:
