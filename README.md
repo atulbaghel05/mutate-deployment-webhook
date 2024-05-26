@@ -57,6 +57,12 @@ kubectl apply -f deploy/service.yaml
 ```
 1. Makes sure that the webhook pod is up and running - `kubectl get pods -n webhook`. Once the webhook is up, create the webhook object - `kubectl apply -f deploy/webhook-admission-configuration.yaml`.
 
+### Testing Mutation
+1. Setup HPA - under directory demo-app run kubectl apply -f deploy/hpa.yaml
+2. Run kubectl apply -f deploy/deployment.yaml
+3. Modify the replica in deployment spec, this should be different from older replica count.
+4. Again run kubectl apply -f deploy/deployment.yaml , this time new deployment should not override the older replica count.
+
 ## Reference
 1. https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/
 1. https://github.com/kubernetes/kubernetes/tree/release-1.9/test/images/webhook
