@@ -50,10 +50,13 @@ git clone git@github.com:dinumathai/admission-webhook-sample.git
 cd admission-webhook-sample
 kubectl create namespace webhook
 kubectl create configmap -n webhook admission-webhook-cert --from-file=deploy/ca/
+docker build -t webhook:webhook-sample-image .
+minikube image load webhook:webhook-sample-image
 kubectl apply -f deploy/deployment.yaml
 kubectl apply -f deploy/service.yaml
 ```
 1. Makes sure that the webhook pod is up and running - `kubectl get pods -n webhook`. Once the webhook is up, create the webhook object - `kubectl apply -f deploy/webhook-admission-configuration.yaml`.
+
 
 ## Developers Guide
 
