@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: admission-webhook
-        image: webhook:tag-10
+        image: webhook:webhook-sample-image
         imagePullPolicy: Never
         ports:
         - containerPort: 8080
