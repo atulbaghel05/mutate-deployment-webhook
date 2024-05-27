@@ -9,9 +9,9 @@ import (
 
 	"github.com/golang/glog"
 	admissionv1 "k8s.io/api/admission/v1"
-	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -65,20 +65,19 @@ func handleMutation(w http.ResponseWriter, r *http.Request) {
 }
 
 func mutateDeployment(review *admissionv1.AdmissionReview, r *http.Request) *admissionv1.AdmissionResponse {
-
 	glog.V(2).Info("mutating deployment")
-
-	deploymentResource := metav1.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	if review.Request.Resource != deploymentResource {
-		glog.Errorf("expect resource to be %s", &deploymentResource)
-		return nil
+	marshalledReview, err := json.Marshal(review)
+	if err != nil {
+		glog.Error(err)
+		return toAdmissionResponse(err)
 	}
+	glog.V(2).Info("review request json", string(marshalledReview))
 
 	rawObject := review.Request.Object.Raw
-	deployment := appsv1.Deployment{}
+	resource := &unstructured.Unstructured{}
 
 	deserializer := codecs.UniversalDeserializer()
-	if _, _, err := deserializer.Decode(rawObject, nil, &deployment); err != nil {
+	if _, _, err := deserializer.Decode(rawObject, nil, resource); err != nil {
 		glog.Error(err)
 		return toAdmissionResponse(err)
 	}
@@ -95,25 +94,38 @@ func mutateDeployment(review *admissionv1.AdmissionReview, r *http.Request) *adm
 		return toAdmissionResponse(err)
 	}
 
-	hpa, err := clientset.AutoscalingV1().HorizontalPodAutoscalers(deployment.Namespace).Get(r.Context(), deployment.Name, metav1.GetOptions{})
+	resourceName := review.Request.Name
+	resourceNamespace := review.Request.Namespace
+	resourceGroupVersionKind := review.Request.Kind
+
+	hpaList, err := clientset.AutoscalingV1().HorizontalPodAutoscalers(resourceNamespace).List(r.Context(), metav1.ListOptions{})
 	if err != nil {
-		glog.Error("Error fetching hpa object ", err)
+		glog.Error("Error fetching hpa list: ", err)
 		return toAdmissionResponse(err)
 	}
 
-	if hpa != nil {
-		statusReplicas := deployment.Status.Replicas
-		patch := []byte(fmt.Sprintf("[{\"op\": \"replace\", \"path\": \"/spec/replicas\", \"value\": %d}]", statusReplicas))
+	for _, hpa := range hpaList.Items {
+		if hpa.Spec.ScaleTargetRef.Kind == resourceGroupVersionKind.Kind &&
+			hpa.Spec.ScaleTargetRef.Name == resourceName &&
+			hpa.Spec.ScaleTargetRef.APIVersion == resourceGroupVersionKind.Group+"/"+resourceGroupVersionKind.Version {
 
-		glog.V(2).Info("Generated patch: %s\n", string(patch))
+			statusReplicas, found, err := unstructured.NestedInt64(resource.Object, "status", "replicas")
+			if err != nil || !found {
+				glog.Error("Failed to get status replicas: ", err)
+				return toAdmissionResponse(fmt.Errorf("failed to get status replicas"))
+			}
 
-		reviewResponse := admissionv1.AdmissionResponse{}
-		reviewResponse.Patch = patch
-		reviewResponse.Allowed = true
-		patchType := admissionv1.PatchTypeJSONPatch
-		reviewResponse.PatchType = &patchType
-		reviewResponse.UID = review.Request.UID
-		return &reviewResponse
+			patch := []byte(fmt.Sprintf("[{\"op\": \"replace\", \"path\": \"/spec/replicas\", \"value\": %d}]", statusReplicas))
+			glog.V(2).Info("Generated patch: ", string(patch))
+
+			reviewResponse := admissionv1.AdmissionResponse{}
+			reviewResponse.Patch = patch
+			reviewResponse.Allowed = true
+			patchType := admissionv1.PatchTypeJSONPatch
+			reviewResponse.PatchType = &patchType
+			reviewResponse.UID = review.Request.UID
+			return &reviewResponse
+		}
 	}
 
 	// If no HPA is found, allow the deployment to set its own replica count
